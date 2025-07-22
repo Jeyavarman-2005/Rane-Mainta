@@ -1,0 +1,366 @@
+/* MachineChatbot.css */
+:root {
+  --primary-color: #5373ff;
+  --primary-light: #5e7cff;
+  --primary-dark: #2a4bd9;
+  --secondary-color: #3a0ca3;
+  --accent-color: #4cc9f0;
+  --success-color: #4ade80;
+  --warning-color: #f59e0b;
+  --error-color: #f87171;
+  --info-color: #60a5fa;
+  
+  --light-bg: #f8fafc;
+  --light-card: #ffffff;
+  --light-text: #334155;
+  --light-border: #e2e8f0;
+  
+  --sidebar-width: 280px;
+  --header-height: 70px;
+  --input-height: 60px;
+  --border-radius: 12px;
+  --border-radius-sm: 8px;
+  --box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  --box-shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+}
+
+html {
+  font-size: 16px;
+}
+
+body {
+  overflow: hidden;
+}
+
+/* Animation Keyframes */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideIn {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
+
+@keyframes typing {
+  from { width: 0; }
+  to { width: 100%; }
+}
+
+/* Main Container */
+.chatbot-container {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  transition: all 0.3s ease;
+  position: relative;
+}
+
+/* Main Chat Area */
+.chat-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  position: relative;
+}
+
+.chat-main.full-width {
+  width: 100%;
+  margin-left: 0;
+}
+
+/* If you have any transitions or animations, you might want to add: */
+.chat-main {
+  transition: width 0.3s ease, margin-left 0.3s ease;
+}
+
+.chat-header {
+  padding: 0 1rem;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--light-border);
+  background-color: var(--light-card);
+  height: var(--header-height);
+  z-index: 10;
+  position: sticky;
+  top: 0;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+}
+
+.menu-button {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  margin-right: 1rem;
+  cursor: pointer;
+  color: var(--light-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  transition: all 0.2s ease;
+}
+
+.sidebar {
+  /* Ensure it can be toggled */
+  transition: transform 0.3s ease;
+}
+
+/* If you want to animate the showing/hiding */
+.sidebar {
+  transform: translateX(0);
+}
+
+.sidebar.hidden {
+  transform: translateX(-100%);
+}
+
+.menu-button:hover {
+  background-color: #f1f5f9;
+  color: var(--primary-color);
+}
+
+/* Navigation Tabs */
+.nav-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--light-border);
+  padding: 0 1rem;
+  background-color: var(--light-card);
+}
+
+.nav-tab {
+  padding: 1rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #64748b;
+  cursor: pointer;
+  position: relative;
+  display: flex;
+  align-items: center;
+  transition: all 0.2s ease;
+}
+
+.nav-tab svg {
+  margin-right: 0.5rem;
+}
+
+.nav-tab:hover {
+  color: var(--primary-color);
+}
+
+.nav-tab.active {
+  color: var(--primary-color);
+}
+
+.nav-tab.active::after {
+  content: "";
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background-color: var(--primary-color);
+}
+
+/* Sources Section */
+.sources-container {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background-color: var(--light-card);
+  border-radius: var(--border-radius);
+  box-shadow: var(--box-shadow);
+}
+
+.sources-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.source-filter {
+  padding: 0.5rem;
+  border-radius: var(--border-radius-sm);
+  border: 1px solid var(--light-border);
+  background-color: white;
+  font-size: 0.9rem;
+}
+
+.sources-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1rem;
+}
+
+.source-card {
+  background-color: white;
+  border-radius: var(--border-radius-sm);
+  padding: 1rem;
+  box-shadow: var(--box-shadow);
+  transition: all 0.2s ease;
+}
+
+.source-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--box-shadow-lg);
+}
+
+.source-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.breakdown-tag {
+  padding: 0.25rem 0.5rem;
+  border-radius: 1rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-transform: capitalize;
+}
+
+.breakdown-tag.mechanical {
+  background-color: #fef3c7;
+  color: #92400e;
+}
+
+.breakdown-tag.electrical {
+  background-color: #dbeafe;
+  color: #1e40af;
+}
+
+.breakdown-tag.hydraulic {
+  background-color: #d1fae5;
+  color: #065f46;
+}
+
+.breakdown-tag.pneumatic {
+  background-color: #ede9fe;
+  color: #5b21b6;
+}
+
+.source-card-body {
+  font-size: 0.85rem;
+  color: #4b5563;
+}
+
+.source-card-body p {
+  margin-bottom: 0.3rem;
+}
+
+.source-card-footer {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 0.5rem;
+}
+
+.source-action-btn {
+  padding: 0.4rem 0.8rem;
+  background-color: #f3f4f6;
+  border: none;
+  border-radius: var(--border-radius-sm);
+  font-size: 0.8rem;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.source-action-btn:hover {
+  background-color: #e5e7eb;
+}
+
+.source-action-btn svg {
+  margin-right: 0.3rem;
+}
+
+.no-sources {
+  text-align: center;
+  padding: 1rem;
+  color: #64748b;
+  font-style: italic;
+}
+
+/* Dashboard Tabs */
+.dashboard-tab {
+  flex: 1;
+  padding: 1.5rem;
+  overflow-y: auto;
+}
+
+/* Responsive Design */
+@media (max-width: 1024px) {
+  .message {
+    max-width: 90%;
+  }
+}
+
+@media (max-width: 768px) {
+  :root {
+    --sidebar-width: 260px;
+  }
+  
+  .header-title h2 {
+    font-size: 1rem;
+  }
+  
+  .header-title p {
+    display: none;
+  }
+  
+  .message-content {
+    max-width: calc(100% - 50px);
+  }
+  
+  .sources-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 480px) {
+  .chat-input {
+    padding-left: 2.5rem;
+  }
+  
+  .file-attach {
+    left: 0.75rem;
+  }
+  
+  .send-button {
+    width: 45px;
+    height: 45px;
+  }
+  
+  .nav-tab span {
+    display: none;
+  }
+  
+  .nav-tab svg {
+    margin-right: 0;
+    font-size: 1.2rem;
+  }
+}

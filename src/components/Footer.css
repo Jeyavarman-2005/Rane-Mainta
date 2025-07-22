@@ -1,0 +1,15 @@
+/* Footer.css */
+.footer {
+  padding: 1rem;
+  text-align: center;
+  background-color: var(--light-card);
+  border-top: 1px solid var(--light-border);
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
+.dark-mode .footer {
+  background-color: var(--dark-card);
+  border-top: 1px solid var(--dark-border);
+  color: var(--dark-text);
+}
