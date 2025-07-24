@@ -1,27 +1,20 @@
-# backend.py (FastAPI application)
-from fastapi import FastAPI, HTTPException, Depends, status
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from langchain_community.chat_models import ChatOpenAI
-from langchain.chat_models import ChatOllama
-from langchain_community.embeddings import OllamaEmbeddings
-from langchain_community.vectorstores import Chroma
 import logging
 import os
-import httpx
-
-
-from typing import List, Dict, Any, Optional
 from datetime import datetime
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
-from langchain_community.llms import Ollama
-from langchain.chat_models import ChatOpenAI
-from langchain_community.embeddings import OllamaEmbeddings
-from langchain_qdrant import QdrantVectorStore
+from typing import List, Dict
+import httpx
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pydantic import BaseModel
 from qdrant_client import QdrantClient
+from langchain_community.chat_models import ChatOllama
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_qdrant import QdrantVectorStore
+
 
 # Configure logging
 logging.basicConfig(
@@ -30,23 +23,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Initialize the RAG system with default master collection
 class MachineBreakdownRAG:
     def __init__(self, user_role: str = 'master'):
-        self.llm = self.llm = ChatOllama(
-            model="deepseek-r1:70b",  # Must match your `ollama list` name
-            temperature=1.5,
-            max_tokens=2048,
+        
+        self.llm = ChatOllama(
+            model="qwq:32b",
+            temperature=0.2,
+            num_ctx=2048,  
+            num_gpu=1,     
+            num_thread=8, 
+            top_k=20,      
+            top_p=0.9,
+            repeat_penalty=1.1,
             model_kwargs={
-                "response_format": {
-                    "type": "text",  # Can be "text" or "json_object"
-                    "structure": {
-                        "summary": "string",
-                        "details": "array",
-                        "actions": "array",
-                        "references": "array"
-                    }
-                }
+                "low_vram": True,  
+                "n_batch": 512,    
             }
         )
         
@@ -62,12 +53,11 @@ class MachineBreakdownRAG:
         self.vector_store = self._initialize_vector_store()
         self.retriever = self.vector_store.as_retriever(
             search_type="similarity",
-            search_kwargs={"k": 50}
+            search_kwargs={"k": 5}  
         )
         self.conversation_history = []
         
     def _initialize_vector_store(self):
-        """Initialize connection to Qdrant vector store"""
         client = QdrantClient(
             host="localhost",
             port=6333,
@@ -81,20 +71,18 @@ class MachineBreakdownRAG:
         )
     
     def switch_collection(self, new_role: str):
-        """Switch to a different collection based on user role"""
         if new_role in self.collection_names:
             self.user_role = new_role
             self.vector_store = self._initialize_vector_store()
             self.retriever = self.vector_store.as_retriever(
                 search_type="similarity",
-                search_kwargs={"k": 50}
+                search_kwargs={"k": 5}
             )
             logger.info(f"Switched to collection for {new_role}")
         else:
             logger.warning(f"Invalid role: {new_role}. Keeping current collection.")
     
     def verify_connection(self):
-        """Verify connection to Qdrant"""
         try:
             self.vector_store.client.get_collections()
             return True, "Connected to Qdrant and vector store is ready"
@@ -102,12 +90,10 @@ class MachineBreakdownRAG:
             return False, f"Connection error: {str(e)}"
         
     def _format_docs(self, docs: List[Dict]) -> str:
-        """Format retrieved documents for context with better structure"""
         formatted = []
         for doc in docs:
             formatted.append(
                 f"### Machine Breakdown Record\n"
-                f"**Machine ID:** {doc.metadata.get('machine_id', 'Unknown')}\n"
                 f"**Machine Name:** {doc.metadata.get('machine_name', 'Unknown')}\n"
                 f"**SAP Code:** {doc.metadata.get('sap_code', 'Unknown')}\n"
                 f"**Plant:** {doc.metadata.get('plant', 'Unknown')}\n"
@@ -115,35 +101,18 @@ class MachineBreakdownRAG:
                 f"**Module:** {doc.metadata.get('module', 'Unknown')}\n"
                 f"**Line:** {doc.metadata.get('line', 'Unknown')}\n"
                 f"**Problem Type:** {doc.metadata.get('problem_type', 'Unknown')}\n"
-                f"**Service Type:** {doc.metadata.get('service_type', 'Unknown')}\n"
                 f"**Shift:** {doc.metadata.get('shift', 'Unknown')}\n"
                 f"**Duration (Minutes):** {doc.metadata.get('duration_minutes', 0)} minutes\n"
-                f"**Duration (Hours):** {doc.metadata.get('duration_hours', 0.0)} hours\n"
                 f"**Start Time:** {doc.metadata.get('start_time', 'Unknown')}\n"
                 f"**End Time:** {doc.metadata.get('end_time', 'Unknown')}\n"
                 f"**Problem:** {doc.metadata.get('problem', 'Unknown')}\n"
                 f"**Solution:** {doc.metadata.get('solution', 'No solution provided')}\n"
-                f"**Details:** {doc.metadata.get('details', 'No additional details')}\n"
-                f"**Closure Reason:** {doc.metadata.get('closure_reason', 'Unknown')}\n"
-                f"**Breakdown Type:** {doc.metadata.get('breakdown_type', 'Unknown')}\n"
-                f"**SAP Status:** {doc.metadata.get('sap_status', 'Unknown')}\n"
-                f"**Sub Group:** {doc.metadata.get('sub_group', 'Unknown')}\n"
-                f"**Phenomena:** {doc.metadata.get('phenomena', 'Unknown')}\n"
-                f"**LOTO:** {doc.metadata.get('loto', 'Unknown')}\n"
-                f"**Vendor:** {doc.metadata.get('vendor', 'Unknown')}\n"
-                f"**Material:** {doc.metadata.get('material', 'Unknown')}\n"
-                f"**Unique ID:** {doc.metadata.get('unique_id', 'Unknown')}\n"
-                f"**Type ID:** {doc.metadata.get('type_id', 'Unknown')}\n"
-                f"**Relevance Score:** {doc.metadata.get('relevance_score', 'N/A')}\n"
-                f"**Human Readable Text:** {doc.metadata.get('human_readable_text', 'N/A')}\n"
-                f"**Full Text:** {doc.metadata.get('full_text', 'N/A')}\n"
             )
         return "\n\n".join(formatted)
     
     def _get_rag_chain(self):
-        """Create the RAG chain with enhanced prompt for better formatting"""
         template = """You are an expert technician assistant analyzing machine breakdown data. 
-        Provide comprehensive, well-structured answers using Markdown formatting with these sections:
+        Respond ONLY in this exact format with these sections (include the section headers):
 
         ### Summary
         - Concise 1-2 sentence overview of the answer
@@ -161,15 +130,15 @@ class MachineBreakdownRAG:
         - Reference specific records from the context
         - Include machine names, dates, and downtime metrics
         
-        Maintain a professional yet approachable tone. If information is incomplete, state what you know and what's uncertain.
+        Current time: {time}
         
-        **Context:** {context}
+        Context: {context}
         
-        **Question:** {question}
+        Question: {question}
         
-        **Conversation History:** {history}
+        Conversation History: {history}
         
-        **Answer:**"""
+        Provide ONLY the formatted response, no additional commentary:"""
         
         prompt = ChatPromptTemplate.from_template(template)
         
@@ -177,7 +146,8 @@ class MachineBreakdownRAG:
             {
                 "context": self.retriever | self._format_docs,
                 "question": RunnablePassthrough(),
-                "history": lambda _: "\n".join(self.conversation_history[-3:])  # Last 3 exchanges
+                "history": lambda _: "\n".join(self.conversation_history[-3:]),
+                "time": lambda _: datetime.now().strftime("%I:%M %p")
             }
             | prompt
             | self.llm
@@ -185,19 +155,19 @@ class MachineBreakdownRAG:
         )
     
     def query(self, question: str) -> str:
-        """Query the RAG system with a question and maintain conversation history"""
         rag_chain = self._get_rag_chain()
-        response = rag_chain.invoke(question)
-        
-        # Update conversation history
-        self.conversation_history.append(f"User: {question}")
-        self.conversation_history.append(f"Assistant: {response}")
-        
-        # Keep history manageable
-        if len(self.conversation_history) > 6:  # 3 exchanges
-            self.conversation_history = self.conversation_history[-6:]
+        try:
+            response = rag_chain.invoke(question)
+            self.conversation_history.append(f"User: {question}")
+            self.conversation_history.append(f"Assistant: {response}")
             
-        return response
+            if len(self.conversation_history) > 6:
+                self.conversation_history = self.conversation_history[-6:]
+                
+            return response
+        except Exception as e:
+            logger.error(f"Error in query processing: {str(e)}")
+            return f"Error processing your request. Please try again. Technical details: {str(e)}"
 
 # Initialize RAG system
 rag_system = MachineBreakdownRAG()
