@@ -6,11 +6,15 @@ from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 import logging
-from typing import List, Any, Optional, Dict
+from typing import List, Any, Optional, Dict, Tuple
 from datetime import datetime
 import pyodbc
 from sqlalchemy import create_engine
 import urllib.parse
+import os
+import time
+from tqdm import tqdm
+import csv
 
 # Configure logging
 logging.basicConfig(
@@ -32,6 +36,46 @@ class DataProcessor:
             '1250': 'machine_data_1250',
             '1300': 'machine_data_1300'
         }
+        self.progress_file = 'vectorization_progress.csv'
+        self.max_retries = 3
+        self.retry_delay = 5  # seconds
+        
+    def _initialize_progress_log(self):
+        """Initialize or load progress tracking file with headers"""
+        if not os.path.exists(self.progress_file):
+            with open(self.progress_file, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['Unique_ID_No', 'Collection', 'Processed', 'Timestamp'])
+
+    def _log_processed_id(self, unique_id: str, collection: str):
+        """Log successfully processed IDs with collection info"""
+        with open(self.progress_file, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([unique_id, collection, True, datetime.now().isoformat()])
+
+    def _get_processed_ids(self) -> Dict[str, set]:
+        """Get dictionary of processed IDs for each collection"""
+        processed = {
+            'master': set(),
+            '1150': set(),
+            '1200': set(),
+            '1250': set(),
+            '1300': set()
+        }
+        
+        if os.path.exists(self.progress_file):
+            try:
+                with open(self.progress_file, 'r') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        if row['Processed'].lower() == 'true':
+                            unique_id = row['Unique_ID_No']
+                            collection = row['Collection']
+                            if collection in processed:
+                                processed[collection].add(unique_id)
+            except Exception as e:
+                logger.warning(f"Error reading progress file: {e}")
+        return processed
         
     def _get_sql_connection(self):
         """Establish connection to SQL Server using Windows Authentication"""
@@ -75,19 +119,15 @@ class DataProcessor:
             if pd.isna(date_str) or str(date_str).strip() == '':
                 return {'date': None, 'time': None, 'datetime': None}
             
-            # Handle cases where date_str might already be a datetime object
             if isinstance(date_str, (pd.Timestamp, datetime)):
                 datetime_obj = date_str
-            # Handle cases where date_str might already contain time
             elif isinstance(date_str, str) and ' ' in date_str:
                 datetime_obj = pd.to_datetime(date_str, errors='coerce')
             else:
-                # Convert date and time separately
                 date_part = pd.to_datetime(date_str, errors='coerce')
                 if pd.isna(date_part):
                     return {'date': None, 'time': None, 'datetime': None}
                 
-                # If time_str is provided, combine with date
                 if not pd.isna(time_str) and str(time_str).strip() != '':
                     if isinstance(time_str, str):
                         time_part = pd.to_datetime(time_str, errors='coerce').time()
@@ -122,7 +162,6 @@ class DataProcessor:
             f"The SAP machine code is {row.get('SapMachnCode', 'UNKNOWN')}."
         ]
 
-        # Add time information if available
         if start_dt['datetime'] and end_dt['datetime']:
             text_parts.append(
                 f"The repair started on {start_dt['datetime']} and ended on {end_dt['datetime']}, "
@@ -133,21 +172,18 @@ class DataProcessor:
                 f"The repair started on {start_dt['datetime']} with a downtime of {row.get('Minutes', 0)} minutes."
             )
         
-        # Add problem and solution information
         text_parts.extend([
             f"The closure reason was {row.get('ClosureReason', 'UNKNOWN')}, and the solution was '{row.get('ActualReason', 'NO SOLUTION PROVIDED')}'.",
             f"The breakdown type is {row.get('Breakdowntype', 'UNKNOWN')}, and the SAP status is {row.get('SapStatus', 'UNKNOWN')}.",
             f"The subgroup is {row.get('SubGroup', 'UNKNOWN')}, and the phenomena was {row.get('Phenomena', 'UNKNOWN')}."
         ])
 
-        # Add LOTO information
         loto = row.get('Loto', '')
         if loto:
             text_parts.append(f"The LOTO (Lock Out Tag Out) status was {loto}.")
         else:
             text_parts.append("No LOTO status was recorded.")
 
-        # Add vendor/material information
         vendor = row.get('Vendor', '')
         material = row.get('Material', '')
         if vendor or material:
@@ -156,28 +192,20 @@ class DataProcessor:
         else:
             text_parts.append("No vendor or material was involved.")
 
-        # Add problem reason and details
         text_parts.append(f"The problem was '{row.get('Reason', 'NO PROBLEM PROVIDED')}'.")
         details = row.get('details', '')
         if details:
             text_parts.append(f"Additional details: {details}")
         
-        # Join all parts and clean up empty lines
         return " ".join(text_parts).replace(" .", ".").replace(" ,", ",")
 
     def load_data(self) -> pd.DataFrame:
         logger.info("🔄 Loading data from SQL Server...")
         try:
-            # Using SQLAlchemy engine for pandas
             engine = self._get_sqlalchemy_engine()
-            
-            # Query to get all data from the table
-            query = "SELECT * FROM MachineBreakdowns_1000"
-            
-            # Read data into DataFrame
+            query = "SELECT * FROM MachineBreakdowns_1200"
             df = pd.read_sql(query, engine)
             
-            # Clean text columns
             text_columns = ['MachineName', 'ProblemType', 'Reason', 'ActualReason', 'details',
                           'ShopName', 'ModuleName', 'LineName', 'Servicetype', 'ClosureReason',
                           'Breakdowntype', 'SubGroup', 'Phenomena', 'Loto', 'Vendor', 'Material']
@@ -186,7 +214,6 @@ class DataProcessor:
                 if col in df.columns:
                     df[col] = df[col].apply(self._clean_text)
 
-            # Fill missing values with appropriate defaults
             df = df.fillna({
                 'SapMachnCode': 'UNKNOWN',
                 'MachineName': 'UNKNOWN_MACHINE',
@@ -204,7 +231,6 @@ class DataProcessor:
                 'EndTime': ''
             })
 
-            # Convert numeric fields
             df['Minutes'] = pd.to_numeric(df['Minutes'], errors='coerce').fillna(0).astype(int)
             df['Hours'] = pd.to_numeric(df['Hours'], errors='coerce').fillna(0).astype(float)
 
@@ -215,7 +241,7 @@ class DataProcessor:
             raise
 
     def create_documents(self, df: pd.DataFrame) -> Dict[str, List[Document]]:
-        """Create documents grouped by plant"""
+        """Create documents grouped by plant with precise tracking"""
         logger.info("📝 Creating documents...")
         
         df['PlantName'] = df['PlantName'].astype(str).str.replace('.0', '', regex=False)
@@ -230,19 +256,37 @@ class DataProcessor:
             '1300': []
         }
 
-        for _, row in df.iterrows():
+        processed_ids = self._get_processed_ids()
+        new_documents_count = 0
+
+        for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing rows"):
             try:
-                plant = str(row['PlantName']).strip()
-                logger.debug(f"Processing plant: {plant} (type: {type(plant)})")
+                unique_id = str(row.get('Unique_ID_No', ''))
+                if not unique_id:
+                    continue
                 
-                machine_id = f"{row['MachineName']}_{row['SapMachnCode']}"
+                plant = str(row['PlantName']).strip()
+                machine_name = row.get('MachineName', 'UNKNOWN_MACHINE')
+                sap_code = row.get('SapMachnCode', 'UNKNOWN')
+                machine_id = f"{machine_name}_{sap_code}"  # Define machine_id here
+                
+                # Document needs to be created if:
+                # 1. Not in master collection OR
+                # 2. Plant-specific and not in that plant's collection
+                needs_master = unique_id not in processed_ids['master']
+                needs_plant = (plant in ['1150', '1200', '1250', '1300'] and 
+                            unique_id not in processed_ids[plant])
+                
+                if not needs_master and not needs_plant:
+                    continue
+                    
                 human_readable_text = self._generate_human_readable_text(row)
 
                 # Generate structured metadata text
                 structured_text_parts = [
                     "MACHINE DETAILS:",
-                    f"Name: {row['MachineName']}",
-                    f"SAP Code: {row['SapMachnCode']}",
+                    f"Name: {machine_name}",
+                    f"SAP Code: {sap_code}",
                     f"Plant: {row.get('PlantName', 'UNKNOWN')}",
                     f"Shop: {row['ShopName']}",
                     f"Module: {row['ModuleName']}",
@@ -277,16 +321,16 @@ class DataProcessor:
                 structured_text = "\n".join(
                     part for part in structured_text_parts 
                     if not (part.endswith(": ") or 
-                          (part.endswith(":") and len(part.split(':')) == 1 or
-                          part.endswith(": UNKNOWN") or
-                          part.endswith(": NO DETAILS PROVIDED") or
-                          part.endswith(": NO SOLUTION PROVIDED"))
+                        (part.endswith(":") and len(part.split(':')) == 1 or
+                        part.endswith(": UNKNOWN") or
+                        part.endswith(": NO DETAILS PROVIDED") or
+                        part.endswith(": NO SOLUTION PROVIDED"))
                 ))
 
                 metadata = {
                     "machine_id": machine_id,
-                    "machine_name": row['MachineName'],
-                    "sap_code": str(row['SapMachnCode']),
+                    "machine_name": machine_name,
+                    "sap_code": sap_code,
                     "plant": str(row.get('PlantName', 'UNKNOWN')),
                     "shop": row['ShopName'],
                     "module": row['ModuleName'],
@@ -309,8 +353,7 @@ class DataProcessor:
                     "loto": row['Loto'],
                     "vendor": row['Vendor'],
                     "material": row['Material'],
-                    "unique_id": str(row.get('Unique_id', '')),
-                    "type_id": str(row.get('Type_id', '')),
+                    "unique_id": unique_id,
                     "human_readable_text": human_readable_text,
                     "full_text": structured_text
                 }
@@ -319,8 +362,8 @@ class DataProcessor:
                 metadata = {
                     k: v for k, v in metadata.items()
                     if v not in ['', 'UNKNOWN', 'NO DETAILS PROVIDED',
-                               'NO SOLUTION PROVIDED', 'NO PROBLEM PROVIDED',
-                               'NAN', 'NULL', 'NONE'] and v is not None
+                            'NO SOLUTION PROVIDED', 'NO PROBLEM PROVIDED',
+                            'NAN', 'NULL', 'NONE'] and v is not None
                 }
 
                 doc = Document(
@@ -328,68 +371,95 @@ class DataProcessor:
                     metadata=metadata
                 )
 
-                # Add to master collection
-                documents['master'].append(doc)
+                # Add to master collection if needed
+                if needs_master:
+                    documents['master'].append(doc)
+                    new_documents_count += 1
                 
-                # Add to specific plant collection if plant is known
-                if plant in ['1150', '1200', '1250', '1300']:
+                # Add to plant collection if needed
+                if needs_plant:
                     documents[plant].append(doc)
-                    logger.debug(f"Added to plant {plant} collection")
+                    new_documents_count += 1
 
             except Exception as e:
                 logger.error(f"Error processing row {row.get('Unique_ID_No', 'UNKNOWN')}: {e}")
                 continue
 
-        # Log document counts for each collection
         plant_counts = {k: len(v) for k, v in documents.items()}
-        logger.info(f"Document counts by plant: {plant_counts}")
+        logger.info(f"New documents to process by plant: {plant_counts}")
+        logger.info(f"Total new documents to process: {new_documents_count}")
 
         return documents
+    
+    def _retry_operation(self, operation, *args, **kwargs):
+        """Retry operation with exponential backoff"""
+        for attempt in range(self.max_retries):
+            try:
+                return operation(*args, **kwargs)
+            except Exception as e:
+                if attempt == self.max_retries - 1:
+                    raise
+                wait_time = self.retry_delay * (attempt + 1)
+                logger.warning(f"Attempt {attempt + 1} failed. Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
 
     def create_vector_stores(self, documents: Dict[str, List[Document]]):
-        """Create vector stores for all collections"""
+        """Create vector stores with precise progress tracking"""
         logger.info("🧠 Creating vector stores...")
 
         # Initialize embeddings and client
         embeddings = OllamaEmbeddings(model="nomic-embed-text")
         client = QdrantClient(host="localhost", port=6333)
         
-        # Vector configuration
         vector_config = models.VectorParams(
             size=768,
             distance=models.Distance.COSINE
         )
 
-        # Create/update collections
         for collection_name, docs in documents.items():
+            if not docs:
+                continue
+                
             try:
                 full_collection_name = self.collection_names[collection_name]
                 
-                # Check if collection exists
-                existing_collections = client.get_collections()
-                collection_exists = any(
-                    col.name == full_collection_name 
-                    for col in existing_collections.collections
-                )
-                
-                if not collection_exists:
-                    logger.info(f"Creating new collection: {full_collection_name}")
-                    client.create_collection(
-                        collection_name=full_collection_name,
-                        vectors_config=vector_config
-                    )
-                
-                logger.info(f"Updating collection: {full_collection_name} with {len(docs)} documents")
-                
-                # Create vector store and add documents
-                vector_store = QdrantVectorStore(
-                    client=client,
-                    collection_name=full_collection_name,
-                    embedding=embeddings
-                )
-                
-                # Add documents (will update existing ones with same IDs)
-                vector_store.add_documents(docs)
+                # Process documents in batches
+                batch_size = 100
+                for i in tqdm(range(0, len(docs), batch_size), 
+                            desc=f"Processing {full_collection_name}"):
+                    batch = docs[i:i + batch_size]
+                    try:
+                        # Create/update collection if needed
+                        existing_collections = client.get_collections()
+                        collection_exists = any(
+                            col.name == full_collection_name 
+                            for col in existing_collections.collections
+                        )
+                        
+                        if not collection_exists:
+                            client.create_collection(
+                                collection_name=full_collection_name,
+                                vectors_config=vector_config
+                            )
+                        
+                        # Add documents to collection
+                        vector_store = QdrantVectorStore(
+                            client=client,
+                            collection_name=full_collection_name,
+                            embedding=embeddings
+                        )
+                        
+                        vector_store.add_documents(batch)
+                        
+                        # Log successful processing for each document
+                        for doc in batch:
+                            unique_id = doc.metadata.get('unique_id')
+                            if unique_id:
+                                self._log_processed_id(unique_id, collection_name)
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to process batch {i//batch_size} for {full_collection_name}: {e}")
+                        continue
                 
                 logger.info(f"✅ Successfully updated {full_collection_name}")
 
@@ -399,14 +469,15 @@ class DataProcessor:
 
     def run(self):
         try:
+            self._initialize_progress_log()
             df = self.load_data()
             documents = self.create_documents(df)
             self.create_vector_stores(documents)
+            logger.info("🚀 Vectorization process completed successfully")
         except Exception as e:
             logger.error(f"💥 Error in processing: {str(e)}", exc_info=True)
             raise
 
-# --- ENTRY POINT ---
 if __name__ == "__main__":
     logger.info("🚀 Starting preprocessing pipeline")
     processor = DataProcessor()
