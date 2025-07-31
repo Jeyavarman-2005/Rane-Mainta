@@ -3,8 +3,8 @@ from langchain_core.documents import Document
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import OllamaEmbeddings 
 from langchain_qdrant import QdrantVectorStore
-from qdrant_client import QdrantClient
-from qdrant_client.http import models
+from qdrant_client import QdrantClient, models
+from qdrant_client.http.exceptions import UnexpectedResponse
 import logging
 from typing import List, Any, Optional, Dict, Tuple
 from datetime import datetime
@@ -13,8 +13,11 @@ from sqlalchemy import create_engine
 import urllib.parse
 import os
 import time
+import uuid
 from tqdm import tqdm
 import csv
+import psutil
+from collections import defaultdict
 
 # Configure logging
 logging.basicConfig(
@@ -37,8 +40,10 @@ class DataProcessor:
             '1300': 'machine_data_1300'
         }
         self.progress_file = 'vectorization_progress.csv'
-        self.max_retries = 3
-        self.retry_delay = 5  # seconds
+        self.max_retries = 5  # Increased retries
+        self.retry_delay = 10  # Increased delay
+        self.batch_size = 50  # Reduced batch size
+        self.max_memory_usage = 0.85  # 85% memory threshold
         
     def _initialize_progress_log(self):
         """Initialize or load progress tracking file with headers"""
@@ -55,13 +60,7 @@ class DataProcessor:
 
     def _get_processed_ids(self) -> Dict[str, set]:
         """Get dictionary of processed IDs for each collection"""
-        processed = {
-            'master': set(),
-            '1150': set(),
-            '1200': set(),
-            '1250': set(),
-            '1300': set()
-        }
+        processed = defaultdict(set)
         
         if os.path.exists(self.progress_file):
             try:
@@ -71,8 +70,7 @@ class DataProcessor:
                         if row['Processed'].lower() == 'true':
                             unique_id = row['Unique_ID_No']
                             collection = row['Collection']
-                            if collection in processed:
-                                processed[collection].add(unique_id)
+                            processed[collection].add(unique_id)
             except Exception as e:
                 logger.warning(f"Error reading progress file: {e}")
         return processed
@@ -155,7 +153,7 @@ class DataProcessor:
         end_dt = self._format_datetime(row['EndDate'], row['EndTime'])
         
         text_parts = [
-            f"The machine with Unique ID {row.get('Unique_ID_No', 'UNKNOWN')} has a Type ID of {row.get('Type_id', 'UNKNOWN')}.",
+            f"The machine with Unique ID {row.get('Unique_ID_No', 'UNKNOWN')} had been analyzed.",
             f"The problem type is '{row.get('ProblemType', 'UNKNOWN')}', and it was repaired in Plant {row.get('PlantName', 'UNKNOWN')}, ",
             f"Shop {row.get('ShopName', 'UNKNOWN')}, Module {row.get('ModuleName', 'UNKNOWN')}, on the {row.get('LineName', 'UNKNOWN')} line.",
             f"The machine name is {row.get('MachineName', 'UNKNOWN')}, and the service type is {row.get('Servicetype', 'UNKNOWN')}.",
@@ -199,11 +197,41 @@ class DataProcessor:
         
         return " ".join(text_parts).replace(" .", ".").replace(" ,", ",")
 
+    def _check_system_resources(self):
+        """Check if system has enough resources to continue processing"""
+        mem = psutil.virtual_memory()
+        if mem.percent > self.max_memory_usage * 100:
+            logger.warning(f"High memory usage detected: {mem.percent}%")
+            return False
+        return True
+
+    def _wait_for_resources(self):
+        """Wait until system resources are available"""
+        while not self._check_system_resources():
+            logger.info(f"Waiting for resources... (current memory: {psutil.virtual_memory().percent}%)")
+            time.sleep(30)
+
+    def _retry_operation(self, operation, *args, **kwargs):
+        """Retry operation with exponential backoff and resource checks"""
+        last_error = None
+        for attempt in range(self.max_retries):
+            try:
+                self._wait_for_resources()
+                return operation(*args, **kwargs)
+            except Exception as e:
+                last_error = e
+                if attempt == self.max_retries - 1:
+                    raise
+                wait_time = self.retry_delay * (attempt + 1)
+                logger.warning(f"Attempt {attempt + 1} failed. Retrying in {wait_time} seconds... Error: {str(e)}")
+                time.sleep(wait_time)
+        raise last_error
+
     def load_data(self) -> pd.DataFrame:
         logger.info("🔄 Loading data from SQL Server...")
         try:
             engine = self._get_sqlalchemy_engine()
-            query = "SELECT * FROM MachineBreakdowns_1200"
+            query = "SELECT * FROM machine_reports"
             df = pd.read_sql(query, engine)
             
             text_columns = ['MachineName', 'ProblemType', 'Reason', 'ActualReason', 'details',
@@ -248,14 +276,7 @@ class DataProcessor:
         unique_plants = df['PlantName'].unique()
         logger.info(f"Unique plant values in data: {unique_plants}")
         
-        documents = {
-            'master': [],
-            '1150': [],
-            '1200': [],
-            '1250': [],
-            '1300': []
-        }
-
+        documents = defaultdict(list)
         processed_ids = self._get_processed_ids()
         new_documents_count = 0
 
@@ -268,11 +289,8 @@ class DataProcessor:
                 plant = str(row['PlantName']).strip()
                 machine_name = row.get('MachineName', 'UNKNOWN_MACHINE')
                 sap_code = row.get('SapMachnCode', 'UNKNOWN')
-                machine_id = f"{machine_name}_{sap_code}"  # Define machine_id here
+                machine_id = f"{machine_name}_{sap_code}"
                 
-                # Document needs to be created if:
-                # 1. Not in master collection OR
-                # 2. Plant-specific and not in that plant's collection
                 needs_master = unique_id not in processed_ids['master']
                 needs_plant = (plant in ['1150', '1200', '1250', '1300'] and 
                             unique_id not in processed_ids[plant])
@@ -282,7 +300,6 @@ class DataProcessor:
                     
                 human_readable_text = self._generate_human_readable_text(row)
 
-                # Generate structured metadata text
                 structured_text_parts = [
                     "MACHINE DETAILS:",
                     f"Name: {machine_name}",
@@ -317,7 +334,6 @@ class DataProcessor:
                     f"Material: {row['Material']}"
                 ]
 
-                # Filter out empty lines and sections
                 structured_text = "\n".join(
                     part for part in structured_text_parts 
                     if not (part.endswith(": ") or 
@@ -358,7 +374,6 @@ class DataProcessor:
                     "full_text": structured_text
                 }
 
-                # Clean metadata by removing empty or default values
                 metadata = {
                     k: v for k, v in metadata.items()
                     if v not in ['', 'UNKNOWN', 'NO DETAILS PROVIDED',
@@ -371,12 +386,10 @@ class DataProcessor:
                     metadata=metadata
                 )
 
-                # Add to master collection if needed
                 if needs_master:
                     documents['master'].append(doc)
                     new_documents_count += 1
                 
-                # Add to plant collection if needed
                 if needs_plant:
                     documents[plant].append(doc)
                     new_documents_count += 1
@@ -391,30 +404,56 @@ class DataProcessor:
 
         return documents
     
-    def _retry_operation(self, operation, *args, **kwargs):
-        """Retry operation with exponential backoff"""
-        for attempt in range(self.max_retries):
+    def _initialize_qdrant_collection(self, client: QdrantClient, collection_name: str, vector_size: int):
+        """Initialize Qdrant collection with optimized settings"""
+        try:
+            # First check if collection exists
             try:
-                return operation(*args, **kwargs)
-            except Exception as e:
-                if attempt == self.max_retries - 1:
-                    raise
-                wait_time = self.retry_delay * (attempt + 1)
-                logger.warning(f"Attempt {attempt + 1} failed. Retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
+                client.get_collection(collection_name)
+                client.delete_collection(collection_name)
+            except Exception:
+                pass  # Collection doesn't exist
+
+            vector_config = models.VectorParams(
+                size=vector_size,
+                distance=models.Distance.COSINE,
+                on_disk=True
+            )
+
+            # Create new collection
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config=vector_config,
+                optimizers_config=models.OptimizersConfigDiff(
+                    indexing_threshold=20000,
+                    memmap_threshold=10000,
+                    max_segment_size=50000,
+                    default_segment_number=2
+                ),
+                shard_number=2
+            )
+            
+            logger.info(f"Created collection {collection_name} with optimized settings")
+        except Exception as e:
+            logger.error(f"Error initializing collection {collection_name}: {e}")
+            raise
 
     def create_vector_stores(self, documents: Dict[str, List[Document]]):
-        """Create vector stores with precise progress tracking"""
+        """Create vector stores with optimized batch processing"""
         logger.info("🧠 Creating vector stores...")
 
         # Initialize embeddings and client
         embeddings = OllamaEmbeddings(model="nomic-embed-text")
-        client = QdrantClient(host="localhost", port=6333)
-        
-        vector_config = models.VectorParams(
-            size=768,
-            distance=models.Distance.COSINE
+        client = QdrantClient(
+            host="localhost",
+            port=6333,
+            prefer_grpc=True,
+            timeout=120
         )
+
+        # First get embedding dimension
+        sample_embedding = embeddings.embed_query("test")
+        vector_size = len(sample_embedding)
 
         for collection_name, docs in documents.items():
             if not docs:
@@ -422,43 +461,50 @@ class DataProcessor:
                 
             try:
                 full_collection_name = self.collection_names[collection_name]
+                self._initialize_qdrant_collection(client, full_collection_name, vector_size)
                 
-                # Process documents in batches
-                batch_size = 100
-                for i in tqdm(range(0, len(docs), batch_size), 
+                # Process documents in optimized batches
+                for i in tqdm(range(0, len(docs), self.batch_size), 
                             desc=f"Processing {full_collection_name}"):
-                    batch = docs[i:i + batch_size]
+                    batch = docs[i:i + self.batch_size]
+                    
                     try:
-                        # Create/update collection if needed
-                        existing_collections = client.get_collections()
-                        collection_exists = any(
-                            col.name == full_collection_name 
-                            for col in existing_collections.collections
+                        # Generate embeddings for the batch
+                        texts = [doc.page_content for doc in batch]
+                        embeddings_list = self._retry_operation(
+                            embeddings.embed_documents,
+                            texts
                         )
                         
-                        if not collection_exists:
-                            client.create_collection(
-                                collection_name=full_collection_name,
-                                vectors_config=vector_config
+                        # Create points with unique IDs
+                        points = [
+                            models.PointStruct(
+                                id=str(uuid.uuid4()),  # Generate proper UUIDs
+                                vector=embeddings_list[j],
+                                payload=doc.metadata
                             )
+                            for j, doc in enumerate(batch)
+                        ]
                         
-                        # Add documents to collection
-                        vector_store = QdrantVectorStore(
-                            client=client,
+                        # Upload with retry
+                        self._retry_operation(
+                            client.upsert,
                             collection_name=full_collection_name,
-                            embedding=embeddings
+                            points=points,
+                            wait=True
                         )
                         
-                        vector_store.add_documents(batch)
-                        
-                        # Log successful processing for each document
+                        # Log successful processing
                         for doc in batch:
                             unique_id = doc.metadata.get('unique_id')
                             if unique_id:
                                 self._log_processed_id(unique_id, collection_name)
                         
+                        # Small delay between batches
+                        time.sleep(1)
+                        
                     except Exception as e:
-                        logger.error(f"Failed to process batch {i//batch_size} for {full_collection_name}: {e}")
+                        logger.error(f"Failed to process batch starting at {i} for {full_collection_name}: {e}")
                         continue
                 
                 logger.info(f"✅ Successfully updated {full_collection_name}")
